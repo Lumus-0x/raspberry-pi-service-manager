@@ -62,16 +62,8 @@ if (-not (Test-Path .git)) {
     git init
 }
 
-$remoteUrl = gh repo view $RepoName --json sshUrl -q .sshUrl
-if (-not $remoteUrl) {
-    # Fallback to https url
-    $remoteUrl = gh repo view $RepoName --json url -q .url
-}
-
-if (-not $remoteUrl) {
-    Write-Error "Unable to determine remote URL from gh."
-    exit 1
-}
+# Get the HTTPS URL directly from the created repo
+$remoteUrl = "https://github.com/Lumus-0x/$RepoName.git"
 
 # Add origin remote if missing
 $existing = git remote get-url origin 2>$null
@@ -80,6 +72,17 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Pushing all branches to origin..."
+
+# Configure git user if not set
+if (-not (git config --get user.email)) {
+    git config --local user.email "$(gh api user --jq .email)"
+    git config --local user.name "$(gh api user --jq .name)"
+}
+
+# Remove any existing git repos in subdirectories
+Get-ChildItem -Path . -Directory -Recurse | Where-Object { Test-Path (Join-Path $_.FullName '.git') } | ForEach-Object {
+    Remove-Item -Path (Join-Path $_.FullName '.git') -Recurse -Force
+}
 
 git add -A
 git commit -m "Initial commit" -q 2>$null
