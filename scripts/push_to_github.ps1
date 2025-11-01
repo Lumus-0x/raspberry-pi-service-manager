@@ -46,11 +46,13 @@ if (-not $Private) {
 }
 
 # Create remote repo
-$createArgs = @($RepoName)
-if ($isPrivate) { $createArgs += '--private' } else { $createArgs += '--public' }
-
 Write-Host "Creating GitHub repo: $RepoName (private: $isPrivate)"
-$createResult = gh repo create @createArgs --confirm 2>&1
+$createResult = ""
+if ($isPrivate) {
+    $createResult = gh repo create $RepoName --private --source=. --remote=origin 2>&1
+} else {
+    $createResult = gh repo create $RepoName --public --source=. --remote=origin 2>&1
+}
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Failed to create repo: $createResult"
     exit 1
