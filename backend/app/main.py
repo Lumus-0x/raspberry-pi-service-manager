@@ -9,19 +9,30 @@ import jwt
 import datetime
 from fastapi import Depends, Request
 
+# Загрузка переменных окружения
 load_dotenv()
 
-# Auth
-SECRET_KEY = os.getenv('SECRET_KEY', 'change-me')
+# Настройки безопасности
+SECRET_KEY = os.getenv('SECRET_KEY', 'eK8#mP9$qL2@nR5&vX7')
 ADMIN_USER = os.getenv('ADMIN_USER', 'admin')
-ADMIN_PASS = os.getenv('ADMIN_PASS', 'admin')
+ADMIN_PASS = os.getenv('ADMIN_PASS', '15937500')
+JWT_EXPIRATION_HOURS = int(os.getenv('JWT_EXPIRATION_HOURS', '8'))
 
-app = FastAPI(title="Raspberry Pi Service Manager")
+# Настройки сервера
+DEBUG = os.getenv('DEBUG', 'true').lower() == 'true'
+
+app = FastAPI(
+    title="Raspberry Pi Service Manager",
+    debug=DEBUG,
+    docs_url="/api/docs" if DEBUG else None,
+    redoc_url="/api/redoc" if DEBUG else None
+)
 
 # Настройка CORS
+allowed_origins = os.getenv('ALLOWED_ORIGINS', 'http://localhost:3000').split(',')
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -29,9 +40,12 @@ app.add_middleware(
 
 # Конфигурация SSH
 ssh_config = {
-    "hostname": os.getenv("PI_HOST", "78.107.254.30"),
-    "username": os.getenv("PI_USER", "admin"),
-    "password": os.getenv("PI_PASSWORD", "15937500")
+    "hostname": os.getenv("PI_HOST"),
+    "username": os.getenv("PI_USER"),
+    "password": os.getenv("PI_PASSWORD"),
+    "port": int(os.getenv("SSH_PORT", "22")),
+    "timeout": int(os.getenv("SSH_TIMEOUT", "10")),
+    "keepalive": os.getenv("SSH_KEEP_ALIVE", "true").lower() == "true"
 }
 
 class ServiceOperation(BaseModel):
@@ -50,8 +64,27 @@ def get_ssh_client():
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        client.connect(**ssh_config)
+        # Проверяем наличие всех необходимых параметров
+        required_params = ['hostname', 'username', 'password']
+        missing_params = [param for param in required_params if not ssh_config.get(param)]
+        if missing_params:
+            raise ValueError(f"Missing required SSH parameters: {', '.join(missing_params)}")
+
+        print(f"Connecting to {ssh_config['hostname']} as {ssh_config['username']}...")
+        client.connect(
+            hostname=ssh_config['hostname'],
+            username=ssh_config['username'],
+            password=ssh_config['password'],
+            port=ssh_config.get('port', 22),
+            timeout=ssh_config.get('timeout', 10),
+            look_for_keys=False,  # Отключаем поиск ключей, используем только пароль
+            allow_agent=False     # Отключаем SSH-agent
+        )
         return client
+    except paramiko.AuthenticationException:
+        raise HTTPException(status_code=503, detail="Authentication failed. Check username and password.")
+    except paramiko.SSHException as e:
+        raise HTTPException(status_code=503, detail=f"SSH error: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Could not connect to Raspberry Pi: {str(e)}")
 
@@ -101,12 +134,28 @@ async def list_services(user: str = Depends(get_current_user)):
     # auth enforced by dependency
     client = get_ssh_client()
     try:
+        # Проверяем соединение простой командой
+        stdin, stdout, stderr = client.exec_command('whoami')
+        if stderr.read():
+            raise HTTPException(status_code=503, detail="Failed to execute commands on Raspberry Pi")
+        
         services = []
         # Попытаемся получить JSON-вывод от systemctl — это самый надёжный способ
+        print("Fetching services list...")
         try:
-            stdin, stdout, stderr = client.exec_command(
-                "sudo systemctl list-units --type=service --all --no-pager --no-legend --output=json"
-            )
+            # Создаем команду sudo с передачей пароля через stdin
+            sudo_command = f'echo "{ssh_config["password"]}" | sudo -S systemctl list-units --type=service --all --no-pager --no-legend --output=json'
+            stdin, stdout, stderr = client.exec_command(sudo_command)
+            
+            # Читаем потенциальные ошибки
+            error = stderr.read().decode()
+            if error and "sorry, try again" in error.lower():
+                raise HTTPException(status_code=503, detail="Invalid sudo password")
+            elif error and "command not found" in error.lower():
+                raise HTTPException(status_code=503, detail="systemctl command not found")
+            elif error and not "password for" in error.lower():  # Игнорируем стандартный промпт sudo
+                print(f"systemctl error: {error}")
+                raise Exception(f"systemctl error: {error}")
             raw = stdout.read().decode()
             data = json.loads(raw)
             # data может быть списком или словарём с ключом units
@@ -154,13 +203,13 @@ async def list_services(user: str = Depends(get_current_user)):
                 parts = line.split()
                 if len(parts) >= 1:
                     service_name = parts[0]
-                    stdin, stdout_status, stderr = client.exec_command(
-                        f"sudo systemctl is-active '{service_name}' 2>/dev/null || echo unknown"
-                    )
+                    # Команды с передачей пароля через stdin
+                    sudo_active = f'echo "{ssh_config["password"]}" | sudo -S systemctl is-active "{service_name}" 2>/dev/null || echo unknown'
+                    stdin, stdout_status, stderr = client.exec_command(sudo_active)
                     status = stdout_status.read().decode().strip()
-                    stdin, stdout_enabled, stderr = client.exec_command(
-                        f"sudo systemctl is-enabled '{service_name}' 2>/dev/null || echo unknown"
-                    )
+
+                    sudo_enabled = f'echo "{ssh_config["password"]}" | sudo -S systemctl is-enabled "{service_name}" 2>/dev/null || echo unknown'
+                    stdin, stdout_enabled, stderr = client.exec_command(sudo_enabled)
                     enabled = stdout_enabled.read().decode().strip()
                     description = ' '.join(parts[4:]) if len(parts) > 4 else ''
                     services.append({
@@ -187,15 +236,15 @@ async def control_service(operation: ServiceOperation, user: str = Depends(get_c
         if not service_name.endswith('.service'):
             service_name += '.service'
         
-        # Выполняем команду управления сервисом
-        command = f"sudo systemctl {operation.action} '{service_name}'"
+        # Выполняем команду управления сервисом с передачей пароля через stdin
+        command = f'echo "{ssh_config["password"]}" | sudo -S systemctl {operation.action} "{service_name}"'
         stdin, stdout, stderr = client.exec_command(command)
         error = stderr.read().decode()
-        if error:
+        if error and not "password for" in error.lower():  # Игнорируем стандартный промпт sudo
             raise HTTPException(status_code=400, detail=error)
             
         # Получаем актуальный статус сервиса после выполнения команды
-        status_command = f"sudo systemctl is-active '{service_name}'"
+        status_command = f'echo "{ssh_config["password"]}" | sudo -S systemctl is-active "{service_name}"'
         stdin, stdout, stderr = client.exec_command(status_command)
         status = stdout.read().decode().strip()
         
