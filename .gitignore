@@ -1,0 +1,44 @@
+## Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+backend/venv/
+env/
+.env
+.env.*
+
+## Node / Next.js
+node_modules/
+.next/
+out/
+build/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+## OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.env.local
+/.history/
+
+## Logs
+*.log
+logs/
+
+## Generated files
+*.pyc
+*.pyd
+
+## Sensitive / personal files
+*.pem
+*.key
+id_rsa*
+id_*.pub
+secrets.yaml
