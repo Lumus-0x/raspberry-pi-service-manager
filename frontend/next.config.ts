@@ -7,11 +7,32 @@ const nextConfig: NextConfig = {
     THEME: process.env.NEXT_PUBLIC_THEME,
   },
   async rewrites() {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
     return [
       {
-        source: '/api/:path*',
-        destination: `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/:path*`
-      }
+        source: '/api/login',
+        destination: `${apiUrl}/login`
+      },
+      {
+        source: '/api/auth/verify',
+        destination: `${apiUrl}/auth/verify`
+      },
+      {
+        source: '/api/services/:path*',
+        destination: `${apiUrl}/services/:path*`
+      },
+      {
+        source: '/api/services/create',
+        destination: `${apiUrl}/services/create`
+      },
+      {
+        source: '/api/services/control',
+        destination: `${apiUrl}/services/control`
+      },
+      {
+        source: '/api/services/delete',
+        destination: `${apiUrl}/services/delete`
+      },
     ]
   },
   images: {

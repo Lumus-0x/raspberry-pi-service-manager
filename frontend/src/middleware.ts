@@ -5,6 +5,11 @@ export function middleware(request: NextRequest) {
   const token = request.cookies.get('token');
   const pathname = request.nextUrl.pathname;
 
+  // Пропускаем API запросы без проверки
+  if (pathname.startsWith('/api/')) {
+    return NextResponse.next();
+  }
+
   // Пути, которые не требуют аутентификации
   if (pathname === '/login') {
     // Если пользователь уже авторизован и пытается зайти на страницу логина,

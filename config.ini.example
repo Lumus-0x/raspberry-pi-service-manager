@@ -1,0 +1,19 @@
+[API]
+backend_url = http://localhost:8000
+frontend_url = http://localhost:3000
+
+[Authentication]
+admin_username = admin
+admin_password = YOUR_PASSWORD_HERE
+token_expiration_days = 30
+
+[SSH]
+host = YOUR_PI_IP_ADDRESS
+username = pi
+password = YOUR_SSH_PASSWORD
+port = 22
+timeout = 10
+
+[Security]
+secret_key = YOUR_SECRET_KEY_HERE
+

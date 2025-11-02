@@ -42,3 +42,5 @@ logs/
 id_rsa*
 id_*.pub
 secrets.yaml
+config.ini
+backend/.env

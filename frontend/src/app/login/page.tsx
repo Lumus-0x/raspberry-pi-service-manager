@@ -14,30 +14,64 @@ export default function LoginPage() {
     setLoading(true);
 
     const formData = new FormData(e.currentTarget);
-    const username = formData.get('username');
-    const password = formData.get('password');
+    const username = formData.get('username') as string;
+    const password = formData.get('password') as string;
 
     try {
-      const response = await fetch('/api/login', {
+      // Используем прямой URL к backend из конфигурации
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+      const response = await fetch(`${apiUrl}/login`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ username, password }),
+        mode: 'cors',
       });
 
+      const responseText = await response.text();
+      console.log('Login response status:', response.status);
+      console.log('Login response text:', responseText);
+
       if (!response.ok) {
-        throw new Error('Invalid credentials');
+        let errorMessage = 'Неверные учетные данные';
+        try {
+          const errorData = JSON.parse(responseText);
+          errorMessage = errorData.detail || errorData.message || errorMessage;
+        } catch {
+          // Если не удалось распарсить JSON, используем дефолтное сообщение
+        }
+        throw new Error(errorMessage);
       }
 
-      const data = await response.json();
+      let data;
+      try {
+        data = JSON.parse(responseText);
+      } catch (parseError) {
+        console.error('Failed to parse response:', parseError);
+        throw new Error('Неверный формат ответа от сервера');
+      }
+
+      // Проверяем наличие токена в ответе
+      const token = data.access_token;
+      if (!token) {
+        console.error('No token in response:', data);
+        throw new Error('Токен не получен от сервера');
+      }
+
       // Сохраняем токен в localStorage и cookies
-      localStorage.setItem('token', data.access_token);
-      document.cookie = `token=${data.access_token}; path=/`;
-      router.push('/');
-      router.refresh();
+      localStorage.setItem('token', token);
+      document.cookie = `token=${token}; path=/; max-age=${30 * 24 * 60 * 60}`;
+      
+      console.log('Token saved, redirecting...');
+      // Небольшая задержка перед перенаправлением для надежности
+      setTimeout(() => {
+        router.push('/');
+        router.refresh();
+      }, 100);
     } catch (err: any) {
-      setError(err.message);
+      console.error('Login error:', err);
+      setError(err.message || 'Произошла ошибка при входе');
     } finally {
       setLoading(false);
     }

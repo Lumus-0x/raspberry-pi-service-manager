@@ -3,33 +3,59 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import paramiko
 import json
-import os
-from dotenv import load_dotenv
 import jwt
 import datetime
 from fastapi import Depends, Request
+from config_loader import load_config
 
-# Загрузка переменных окружения
-load_dotenv()
-
-# Настройки безопасности
-SECRET_KEY = os.getenv('SECRET_KEY', 'eK8#mP9$qL2@nR5&vX7')
-ADMIN_USER = os.getenv('ADMIN_USER', 'admin')
-ADMIN_PASS = os.getenv('ADMIN_PASS', '15937500')
-JWT_EXPIRATION_HOURS = int(os.getenv('JWT_EXPIRATION_HOURS', '8'))
+# Загрузка конфигурации из config.ini
+try:
+    config = load_config()
+    SECRET_KEY = config['security']['secret_key']
+    ADMIN_USER = config['auth']['admin_username']
+    ADMIN_PASS = config['auth']['admin_password']
+    TOKEN_EXPIRATION_DAYS = config['auth']['token_expiration_days']
+    BACKEND_URL = config['api']['backend_url']
+    FRONTEND_URL = config['api']['frontend_url']
+    
+    # Конфигурация SSH
+    ssh_config = {
+        "hostname": config['ssh']['host'],
+        "username": config['ssh']['username'],
+        "password": config['ssh']['password'],
+        "port": config['ssh']['port'],
+        "timeout": config['ssh']['timeout'],
+        "keepalive": True
+    }
+except Exception as e:
+    print(f"Warning: Could not load config.ini: {e}")
+    # Fallback значения
+    SECRET_KEY = 'eK8#mP9$qL2@nR5&vX7'
+    ADMIN_USER = 'admin'
+    ADMIN_PASS = '15937500'
+    TOKEN_EXPIRATION_DAYS = 30
+    BACKEND_URL = 'http://localhost:8000'
+    FRONTEND_URL = 'http://localhost:3000'
+    
+    ssh_config = {
+        "hostname": "",
+        "username": "pi",
+        "password": "",
+        "port": 22,
+        "timeout": 10,
+        "keepalive": True
+    }
 
 # Настройки сервера
-DEBUG = os.getenv('DEBUG', 'true').lower() == 'true'
-
 app = FastAPI(
     title="Raspberry Pi Service Manager",
-    debug=DEBUG,
-    docs_url="/api/docs" if DEBUG else None,
-    redoc_url="/api/redoc" if DEBUG else None
+    debug=True,
+    docs_url="/api/docs",
+    redoc_url="/api/redoc"
 )
 
 # Настройка CORS
-allowed_origins = os.getenv('ALLOWED_ORIGINS', 'http://localhost:3000').split(',')
+allowed_origins = [FRONTEND_URL, BACKEND_URL]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -38,19 +64,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Конфигурация SSH
-ssh_config = {
-    "hostname": os.getenv("PI_HOST"),
-    "username": os.getenv("PI_USER"),
-    "password": os.getenv("PI_PASSWORD"),
-    "port": int(os.getenv("SSH_PORT", "22")),
-    "timeout": int(os.getenv("SSH_TIMEOUT", "10")),
-    "keepalive": os.getenv("SSH_KEEP_ALIVE", "true").lower() == "true"
-}
-
 class ServiceOperation(BaseModel):
     name: str
-    action: str  # start, stop, restart, status
+    action: str  # start, stop, restart, status, enable, disable
 
 class ServiceConfig(BaseModel):
     name: str
@@ -64,8 +80,8 @@ def get_ssh_client():
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        # Проверяем наличие всех необходимых параметров
-        required_params = ['hostname', 'username', 'password']
+        # Проверяем наличие обязательных параметров (password может быть пустым для ключей)
+        required_params = ['hostname', 'username']
         missing_params = [param for param in required_params if not ssh_config.get(param)]
         if missing_params:
             raise ValueError(f"Missing required SSH parameters: {', '.join(missing_params)}")
@@ -90,10 +106,12 @@ def get_ssh_client():
 
 
 # --- Authentication helpers (moved up so Depends(get_current_user) is available) ---
-def create_token(username: str):
+def create_token(username: str, expiration_days: int = None):
+    if expiration_days is None:
+        expiration_days = TOKEN_EXPIRATION_DAYS
     payload = {
         'sub': username,
-        'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(days=expiration_days)
     }
     return jwt.encode(payload, SECRET_KEY, algorithm='HS256')
 
@@ -125,9 +143,26 @@ async def login(payload: dict):
     username = payload.get('username')
     password = payload.get('password')
     if username == ADMIN_USER and password == ADMIN_PASS:
-        token = create_token(username)
-        return {'access_token': token, 'token_type': 'bearer'}
+        token = create_token(username, expiration_days=TOKEN_EXPIRATION_DAYS)
+        return {
+            'access_token': token, 
+            'token_type': 'bearer', 
+            'expires_in': TOKEN_EXPIRATION_DAYS * 24 * 3600
+        }
     raise HTTPException(status_code=401, detail='Invalid credentials')
+
+@app.get('/api/config')
+async def get_frontend_config():
+    """Endpoint для получения конфигурации фронтенда"""
+    return {
+        'api_url': BACKEND_URL,
+        'frontend_url': FRONTEND_URL,
+    }
+
+@app.get('/auth/verify')
+async def verify_token(user: str = Depends(get_current_user)):
+    """Легковесный endpoint для проверки валидности токена без SSH соединения"""
+    return {'valid': True, 'user': user}
 
 @app.get("/services")
 async def list_services(user: str = Depends(get_current_user)):
@@ -228,7 +263,7 @@ async def control_service(operation: ServiceOperation, user: str = Depends(get_c
     # auth enforced by dependency
     client = get_ssh_client()
     try:
-        if operation.action not in ["start", "stop", "restart", "status"]:
+        if operation.action not in ["start", "stop", "restart", "status", "enable", "disable"]:
             raise HTTPException(status_code=400, detail="Invalid action")
         
         # Очищаем и экранируем имя сервиса
@@ -242,8 +277,20 @@ async def control_service(operation: ServiceOperation, user: str = Depends(get_c
         error = stderr.read().decode()
         if error and not "password for" in error.lower():  # Игнорируем стандартный промпт sudo
             raise HTTPException(status_code=400, detail=error)
+        
+        # Для enable/disable получаем актуальный enabled статус
+        if operation.action in ["enable", "disable"]:
+            enabled_command = f'echo "{ssh_config["password"]}" | sudo -S systemctl is-enabled "{service_name}"'
+            stdin, stdout, stderr = client.exec_command(enabled_command)
+            enabled_status = stdout.read().decode().strip()
             
-        # Получаем актуальный статус сервиса после выполнения команды
+            return {
+                "status": "success",
+                "service_enabled": enabled_status,
+                "message": f"Service {operation.name} {operation.action} completed successfully"
+            }
+        
+        # Для start/stop/restart получаем актуальный статус сервиса
         status_command = f'echo "{ssh_config["password"]}" | sudo -S systemctl is-active "{service_name}"'
         stdin, stdout, stderr = client.exec_command(status_command)
         status = stdout.read().decode().strip()
@@ -257,18 +304,18 @@ async def control_service(operation: ServiceOperation, user: str = Depends(get_c
         client.close()
 
 @app.post("/services/create")
-async def create_service(config: ServiceConfig, user: str = Depends(get_current_user)):
+async def create_service(service_config: ServiceConfig, user: str = Depends(get_current_user)):
     client = get_ssh_client()
     try:
         # Создаем service файл напрямую из предоставленного конфига
-        command = f"echo '{config.command}' | sudo tee /etc/systemd/system/{config.name}"
+        command = f"echo '{service_config.command}' | sudo tee /etc/systemd/system/{service_config.name}"
         stdin, stdout, stderr = client.exec_command(command)
         error = stderr.read().decode()
         if error:
             raise HTTPException(status_code=400, detail=f"Error creating service: {error}")
 
         # Устанавливаем правильные разрешения
-        client.exec_command(f"sudo chmod 644 /etc/systemd/system/{config.name}")
+        client.exec_command(f"sudo chmod 644 /etc/systemd/system/{service_config.name}")
 
         # Перезагружаем systemd
         client.exec_command("sudo systemctl daemon-reload")
